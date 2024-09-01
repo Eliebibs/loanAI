@@ -19,11 +19,12 @@ from hyperopt.pyll import scope
 from sklearn.metrics import mean_absolute_error
 from hyperopt import fmin, tpe, hp, STATUS_OK
 from neptune.integrations.xgboost import NeptuneCallback
-from sklearn.metrics import classification_report, confusion_matrix
-import pickle
+from sklearn.metrics import classification_report, confusion_matrix, roc_curve, precision_recall_curve
+from sklearn.metrics import ConfusionMatrixDisplay, RocCurveDisplay, PrecisionRecallDisplay
 import time
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import GridSearchCV
+import pickle
 
 
 """
@@ -41,6 +42,14 @@ Keep in mind employmet type is misspelled like how it was just spelled
 5. Encode categorical data
 6. Encode ordinal data
 7. Convert boolean values to numbers
+8. Balance the data using oversampling
+9. Split the data into training and testing data
+10. Train the model using XGBoost
+11. Optimize the hyperparameters using hyperopt
+12. Train the model with the best hyperparameters
+13. Print the best hyperparameters
+14. Print the classification report and confusion matrix
+15. Save the model to a file
 """
 
 def read_excel_data(path, sheet_names):
@@ -290,6 +299,7 @@ def train_model_xgboost(params):
     return {'status' : STATUS_OK, 'loss' : mae }
 
 #this function is used to train the model with the best parameters, it is used to get the best parameters from the hyperopt search
+#we are not using this function in the final model
 def random_forest_classifier_grid_search(param_grid, x_train, y_train):
 
     #create randome forest classifier
@@ -318,25 +328,46 @@ best_params = fmin(
     #trials = spark_trials
     )
 
-run.stop()
-
 #access the best hyperparameters
 best_hyperparams = {k : best_params[k] for k in best_params}
 
 #Train the final model with XGBoost using the best hyperparameters
 final_model = xgb.XGBClassifier(
-    max_depth= int(best_hyperparams['max_depth']),
+    max_depth_best= int(best_hyperparams['max_depth']),
     learning_rate_best = best_hyperparams['learning_rate'],
     gamma_best = best_hyperparams['gamma'],
     subsample_best = best_hyperparams['subsample'],
     colsample_bytree_best = best_hyperparams['colsample_bytree'],
     random_state = 42,
-    tree_method = 'hist', enable_categorical = True # use GPU for faster training
+    tree_method = 'hist', 
+    enable_categorical = True # use GPU for faster training
 )
 
 final_model.fit(train_x, train_y) #train the final model
 
 y_pred = final_model.predict(test_x) #predict the values
+
+#following graphs are shown in neptune 
+
+## Generate and log confusion matrix
+fig, ax = plt.subplots()
+ConfusionMatrixDisplay.from_estimator(final_model, test_x, test_y, ax=ax)
+run['confusion_matrix'].upload(fig)
+plt.close(fig)
+
+# Generate and log ROC curve
+fig, ax = plt.subplots()
+RocCurveDisplay.from_estimator(final_model, test_x, test_y, ax=ax)
+run['roc_curve'].upload(fig)
+plt.close(fig)
+
+# Generate and log Precision-Recall curve
+fig, ax = plt.subplots()
+PrecisionRecallDisplay.from_estimator(final_model, test_x, test_y, ax=ax)
+run['precision_recall_curve'].upload(fig)
+plt.close(fig)
+
+run.stop()
 
 # Print the best hyperparameters
 print("Best Hyperparameters:")
@@ -347,6 +378,9 @@ for param, value in best_hyperparams.items():
 print("Classification Report: \n", classification_report(test_y, y_pred)) #print the classification report
 print("Confusion Matrix: \n", confusion_matrix(test_y, y_pred)) #print the confusion matrix
 
+
+"""
+This saves the final model to my folder
 # Define the file path
 file_name = '/Users/eliebibliowicz/Desktop/AiEducation/loanAICA/bestFitModel.pkl'
 
@@ -354,4 +388,31 @@ file_name = '/Users/eliebibliowicz/Desktop/AiEducation/loanAICA/bestFitModel.pkl
 with open(file_name, 'wb') as file:
     pickle.dump(final_model, file)
 
-print(f"Model saved to {file_name}")
+"""
+
+"""
+This logs the model to neptune
+model = neptune.init_model(
+    name="Prediction model",
+    key="MOD", 
+    project="eliebibliowicz/loanAiCA", 
+    api_token="eyJhcGlfYWRkcmVzcyI6Imh0dHBzOi8vYXBwLm5lcHR1bmUuYWkiLCJhcGlfdXJsIjoiaHR0cHM6Ly9hcHAubmVwdHVuZS5haSIsImFwaV9rZXkiOiJlNTAwNmRjMi05NWVmLTQ0NDYtYTliMi1jN2IyM2YzODNmYTcifQ==", # your credentials
+)
+
+file_name = '/Users/eliebibliowicz/Desktop/AiEducation/loanAICA/bestFitModel.pkl'
+model["model/bestFitModel.pkl"].upload(file_name)
+"""
+"""
+used for grid search with random forest classifier
+param_grid = {
+    'n_estimators': [100, 200, 300],
+    'max_depth': [None, 5, 10],
+    'min_samples_split': [2, 5, 10],
+}
+"""
+
+#use grid search to find the best parameters for the random forest classifier (not used in the final model)
+#this is antoher way to find the best parameters, not as efficient as hyperopt with xgboost
+#best_params_forest = random_forest_classifier_grid_search(param_grid, train_x, train_y)
+
+
