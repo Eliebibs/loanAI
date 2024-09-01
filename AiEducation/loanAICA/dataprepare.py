@@ -1,6 +1,6 @@
 import graphviz 
-import xgboost
-import hyperopt 
+import xgboost as xgb
+import hyperopt as hp
 import mlflow 
 import deepchecks
 import neptune_xgboost
@@ -13,6 +13,18 @@ import matplotlib.pyplot as plt
 import os
 from sklearn.preprocessing import OrdinalEncoder
 from imblearn.over_sampling import SMOTE
+from sklearn.model_selection import train_test_split
+import neptune
+from hyperopt.pyll import scope
+from sklearn.metrics import mean_absolute_error
+from hyperopt import fmin, tpe, hp, STATUS_OK
+from neptune.integrations.xgboost import NeptuneCallback
+from sklearn.metrics import classification_report, confusion_matrix
+import pickle
+import time
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import GridSearchCV
+
 
 """
 This file is used to prepare the data for the model.
@@ -215,3 +227,131 @@ Number of rows where defaulter is 0: 130254
 Total number of rows: 260508
 """
 
+"""
+Test training and testing data
+test size is 20% of the data, 80% is used for training
+the random state is set to 42 to ensure the same split is used each time
+XGboost creates the validation set itself so we dont need to create a validation set
+"""
+
+#set x equal to all columns except the target column and y equal to the target column (defaulter)
+X = data.drop(columns=[target_column])
+y = data[target_column]
+
+#split the data into training and testing data
+train_x, test_x, train_y, test_y = train_test_split(X, y, test_size=0.2, random_state=42)
+
+
+"""
+Training the model with XGBoost
+"""
+
+#configure neptune
+api_token = "eyJhcGlfYWRkcmVzcyI6Imh0dHBzOi8vYXBwLm5lcHR1bmUuYWkiLCJhcGlfdXJsIjoiaHR0cHM6Ly9hcHAubmVwdHVuZS5haSIsImFwaV9rZXkiOiJlNTAwNmRjMi05NWVmLTQ0NDYtYTliMi1jN2IyM2YzODNmYTcifQ=="
+
+run = neptune.init_run(project='loanAiCA', api_token=api_token)
+
+
+neptune_callback = NeptuneCallback(run=run, log_tree=[0, 1, 2,3])
+
+
+#using hyperopt to optimize the hyperparameters
+#it sets a range for each hyperparameter and then tries to find the best combination of hyperparameters
+search_space = {
+    'learning_rate': hp.loguniform('learning_rate', -7, 0),
+    'max_depth': scope.int(hp.uniform('max_depth', 1, 100)),
+    'min_child_weight': hp.loguniform('min_child_weight', -2, 3),
+    'subsample': hp.uniform('subsample', 0.5, 1),
+    'colsample_bytree': hp.uniform('colsample_bytree', 0.5, 1),
+    'gamma': hp.loguniform('gamma', -10, 10),
+    'alpha': hp.loguniform('alpha', -10, 10),
+    'lambda': hp.loguniform('lambda', -10, 10),
+    'objective' : 'binary:logistic',
+    'eval_metric': 'error',
+    'seed': 123
+}
+
+#this function initiates the model with the params and trains it, it also logs models in neptune
+def train_model_xgboost(params):
+    start_time = time.time()
+
+    #this creates the model and sets the params, num_boost_round is the number of boosting rounds, verbose_eval is set to false to not print the output, and the neptune callback is used to log the model
+    model = xgb.XGBClassifier(params=params, num_boost_round=5000, verbose_eval=False, callbacks = [neptune_callback])
+
+    run_time = time.time() - start_time
+
+    #this trains the model
+    model.fit(train_x, train_y)
+
+    #this predicts the values, calculates the mean absolute error, and returns the loss
+    predictions = model.predict(test_x)
+    mae = mean_absolute_error(test_y, predictions)
+
+    return {'status' : STATUS_OK, 'loss' : mae }
+
+#this function is used to train the model with the best parameters, it is used to get the best parameters from the hyperopt search
+def random_forest_classifier_grid_search(param_grid, x_train, y_train):
+
+    #create randome forest classifier
+    rf = RandomForestClassifier()
+
+    grid_search = GridSearchCV(rf, param_grid, cv=5, scoring = 'accuracy')
+    grid_search.fit(x_train, y_train)
+
+    return grid_search.best_params_
+
+
+#finding best paremeters using the fmin function from hyperopt
+#fn is the function to optimize
+#space is the search space for the paraemters (previously defined)
+#max_evals is the number of iterations to run (epochs), the more you do the better it is but it takes longer
+#rstate is the random state
+#trials is the trials object to store the results of the experiments
+
+best_params = fmin(
+    fn = train_model_xgboost, 
+    space = search_space, 
+    algo = tpe.suggest, 
+    max_evals = 15, 
+    rstate = 
+    np.random.default_rng(123)
+    #trials = spark_trials
+    )
+
+run.stop()
+
+#access the best hyperparameters
+best_hyperparams = {k : best_params[k] for k in best_params}
+
+#Train the final model with XGBoost using the best hyperparameters
+final_model = xgb.XGBClassifier(
+    max_depth= int(best_hyperparams['max_depth']),
+    learning_rate_best = best_hyperparams['learning_rate'],
+    gamma_best = best_hyperparams['gamma'],
+    subsample_best = best_hyperparams['subsample'],
+    colsample_bytree_best = best_hyperparams['colsample_bytree'],
+    random_state = 42,
+    tree_method = 'hist', enable_categorical = True # use GPU for faster training
+)
+
+final_model.fit(train_x, train_y) #train the final model
+
+y_pred = final_model.predict(test_x) #predict the values
+
+# Print the best hyperparameters
+print("Best Hyperparameters:")
+for param, value in best_hyperparams.items():
+    print(f"{param}: {value}")
+
+#this prings out metrics to understand how well the model is performing
+print("Classification Report: \n", classification_report(test_y, y_pred)) #print the classification report
+print("Confusion Matrix: \n", confusion_matrix(test_y, y_pred)) #print the confusion matrix
+
+# Define the file path
+file_name = '/Users/eliebibliowicz/Desktop/AiEducation/loanAICA/bestFitModel.pkl'
+
+# Save the best fit model to a file
+with open(file_name, 'wb') as file:
+    pickle.dump(final_model, file)
+
+print(f"Model saved to {file_name}")
