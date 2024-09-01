@@ -184,6 +184,7 @@ for column in boolean_columns:
 Use oversampling to blanace the data since the target variable is imbalanced, there are many more values where
 defaulter is 0 (no default) than 1 (default), so we use oversampling, which is a technique used to balance 
 the data, to ensure the model is not biased towards the majority class (no default)
+oversampling is done using the SMOTE technique and duplicates the minority class to balance the data
 """
 
 target_column = 'Defaulter'
@@ -207,15 +208,10 @@ resampled_data = oversample_data(data, target_column)
 
 data = resampled_data
 
-# Print the number of rows where defaulter is 1
-num_defaulters = len(data[data['Defaulter'] == 1])
-print("Number of rows where defaulter is 1:", num_defaulters)
-
-# Print the number of rows where defaulter is 0
-num_non_defaulters = len(data[data['Defaulter'] == 0])
-print("Number of rows where defaulter is 0:", num_non_defaulters)
-
-# Print the total number of rows
-total_rows = len(data)
-print("Total number of rows:", total_rows)
+"""
+After oversampling data to balance it, here is the stats
+Number of rows where defaulter is 1: 130254
+Number of rows where defaulter is 0: 130254
+Total number of rows: 260508
+"""
 
