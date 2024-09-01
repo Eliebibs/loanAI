@@ -7,6 +7,12 @@ import neptune_xgboost
 import sklearn
 import pandas as pd
 import numpy as np
+import seaborn as sns
+import matplotlib
+import matplotlib.pyplot as plt
+import os
+from sklearn.preprocessing import OrdinalEncoder
+from imblearn.over_sampling import SMOTE
 
 """
 This file is used to prepare the data for the model.
@@ -19,6 +25,10 @@ Keep in mind employmet type is misspelled like how it was just spelled
 1. Read the data from the excel file and analyze it
 2. Merge the data from different sheets based on user_id
 3. Deal with missing values
+4. Drop columns that are not needed
+5. Encode categorical data
+6. Encode ordinal data
+7. Convert boolean values to numbers
 """
 
 def read_excel_data(path, sheet_names):
@@ -99,15 +109,113 @@ columns_to_replace = ['Tier of Employment']
 df = replace_missing_values(df, columns_to_replace, replace_with)
 
 
-#drop missing values in industry and work experience since they only have 4 missing values (not significant)
-df = df.dropna(subset=['Industry', 'Work Experience'])
-
-
 #reassign missing values and print to make sure it worked, it did
 missing_values = df.isnull().sum()
-print(missing_values)
+
+columns_to_drop = ['Industry', 'User_id', 'User id_x', 'User id_y', 'Pincode', 'Role']
+
+def drop_columns(df, columns):
+    df.drop(columns=columns, inplace=True)
+    return df
+
+# Call the function to drop the specified columns
+"""
+Drop industry and role since there are too many categories
+Drop user_id since we wont need that and data has already been merged across sheets
+Drop pincode since it is hidden in data
+"""
+df = drop_columns(df, columns_to_drop)
+
+#drop missing values in work experience since it only has 4 missing values (not significant) so remove its rows where its missing
+df = df.dropna(subset=['Work Experience'])
 
 
+"""
+# Calculate the correlation matrix
+float_columns = df.select_dtypes(include=['float', 'int']).columns
+correlation_matrix = df[float_columns].corr()
+
+# Generate the heatmap
+plt.figure(figsize=(10, 8))
+sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', fmt=".2f", linewidths=0.5)
+plt.title('Correlation Heatmap')
 
 
+# Save the heatmap to a file
+plt.savefig('heatmap.png')
+
+# Open the saved file using an image viewer
+os.system('open heatmap.png')
+"""
+
+data = df
+
+#categorical one hot encoding
+categorical_columns = ['Gender', 'Home', 'Social Profile', 'Loan Category', 'Is_verified', 'Married', 'Employmet type']
+
+#do one hot encoding with the get dummies from pandas
+encoded_data = data = pd.get_dummies(data, columns=categorical_columns)
+
+
+#ordinal encoding 
+ordinal_features = ['Tier of Employment', 'Work Experience']
+
+data = encoded_data
+
+#create custom mapping for ordinal encoding
+tier_employment_order = list(encoded_data['Tier of Employment'].unique())
+tier_employment_order.sort()
+work_experience_order = [0, '<1', '1-2', '2-3', '3-5', '5-10', '10+']
+
+custom_mapping = [tier_employment_order, work_experience_order]
+
+#perform ordinal encoding
+ordinal_encoder = OrdinalEncoder(categories=custom_mapping)
+data[ordinal_features] = ordinal_encoder.fit_transform(data[ordinal_features])
+
+# Convert boolean values to numbers
+boolean_columns = data.select_dtypes(include=bool).columns
+
+for column in boolean_columns:
+    data[column] = data[column].astype(int)
+
+
+"""
+Use oversampling to blanace the data since the target variable is imbalanced, there are many more values where
+defaulter is 0 (no default) than 1 (default), so we use oversampling, which is a technique used to balance 
+the data, to ensure the model is not biased towards the majority class (no default)
+"""
+
+target_column = 'Defaulter'
+
+def oversample_data(data, target_column):
+    # Separate the features and the target variable
+    X = data.drop(columns=[target_column])
+    y = data[target_column]
+
+    # Apply SMOTE oversampling
+    oversampler = SMOTE()
+    X_resampled, y_resampled = oversampler.fit_resample(X, y)
+
+    # Combine the resampled features and target variable into a new DataFrame
+    resampled_data = pd.concat([X_resampled, y_resampled], axis=1)
+
+    return resampled_data
+
+# Call the oversample_data function
+resampled_data = oversample_data(data, target_column)
+
+data = resampled_data
+
+# Print the number of rows where defaulter is 1
+num_defaulters = len(data[data['Defaulter'] == 1])
+print("Number of rows where defaulter is 1:", num_defaulters)
+
+# Print the number of rows where defaulter is 0
+num_non_defaulters = len(data[data['Defaulter'] == 0])
+print("Number of rows where defaulter is 0:", num_non_defaulters)
+
+# Print the total number of rows
+total_rows = len(data)
+print("Total number of rows:", total_rows)
 
