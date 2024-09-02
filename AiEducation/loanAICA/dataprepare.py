@@ -11,7 +11,10 @@ import seaborn as sns
 import matplotlib
 import matplotlib.pyplot as plt
 import os
-from sklearn.preprocessing import OrdinalEncoder
+import neptune
+import time
+import pickle
+import shap
 from imblearn.over_sampling import SMOTE
 from sklearn.model_selection import train_test_split
 import neptune
@@ -19,12 +22,20 @@ from hyperopt.pyll import scope
 from sklearn.metrics import mean_absolute_error
 from hyperopt import fmin, tpe, hp, STATUS_OK
 from neptune.integrations.xgboost import NeptuneCallback
-from sklearn.metrics import classification_report, confusion_matrix
-import pickle
+from sklearn.metrics import classification_report, confusion_matrix, roc_curve, precision_recall_curve
+from sklearn.metrics import ConfusionMatrixDisplay, RocCurveDisplay, PrecisionRecallDisplay
 import time
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import GridSearchCV
-
+import pickle
+from deepchecks.tabular import Dataset
+from deepchecks.tabular.checks import WeakSegmentsPerformance
+from sklearn.preprocessing import OrdinalEncoder
+from alibi.explainers import AnchorTabular
+from alibi.explainers import CounterFactualProto
+import tensorflow as tf
+tf.get_logger().setLevel('40')
+tf.compat.v1.disable_v2_behavior()
 
 """
 This file is used to prepare the data for the model.
@@ -41,6 +52,19 @@ Keep in mind employmet type is misspelled like how it was just spelled
 5. Encode categorical data
 6. Encode ordinal data
 7. Convert boolean values to numbers
+8. Balance the data using oversampling
+9. Split the data into training and testing data
+10. Train the model using XGBoost
+11. Optimize the hyperparameters using hyperopt
+12. Train the model with the best hyperparameters
+13. Print the best hyperparameters
+14. Print the classification report and confusion matrix
+15. Save the model to a file
+16. Log the model to Neptune
+17. Filter the data to get the false positives and false negatives
+18. Run the WeakSegmentsPerformance check on the false positives and false negatives
+19. Explain the model using SHAP values
+20. Explain the model using Anchor explanations
 """
 
 def read_excel_data(path, sheet_names):
@@ -290,6 +314,7 @@ def train_model_xgboost(params):
     return {'status' : STATUS_OK, 'loss' : mae }
 
 #this function is used to train the model with the best parameters, it is used to get the best parameters from the hyperopt search
+#we are not using this function in the final model
 def random_forest_classifier_grid_search(param_grid, x_train, y_train):
 
     #create randome forest classifier
@@ -318,25 +343,46 @@ best_params = fmin(
     #trials = spark_trials
     )
 
-run.stop()
-
 #access the best hyperparameters
 best_hyperparams = {k : best_params[k] for k in best_params}
 
 #Train the final model with XGBoost using the best hyperparameters
 final_model = xgb.XGBClassifier(
-    max_depth= int(best_hyperparams['max_depth']),
+    max_depth_best= int(best_hyperparams['max_depth']),
     learning_rate_best = best_hyperparams['learning_rate'],
     gamma_best = best_hyperparams['gamma'],
     subsample_best = best_hyperparams['subsample'],
     colsample_bytree_best = best_hyperparams['colsample_bytree'],
     random_state = 42,
-    tree_method = 'hist', enable_categorical = True # use GPU for faster training
+    tree_method = 'hist', 
+    enable_categorical = True # use GPU for faster training
 )
 
 final_model.fit(train_x, train_y) #train the final model
 
 y_pred = final_model.predict(test_x) #predict the values
+
+#following graphs are shown in neptune 
+
+## Generate and log confusion matrix
+fig, ax = plt.subplots()
+ConfusionMatrixDisplay.from_estimator(final_model, test_x, test_y, ax=ax)
+run['confusion_matrix'].upload(fig)
+plt.close(fig)
+
+# Generate and log ROC curve
+fig, ax = plt.subplots()
+RocCurveDisplay.from_estimator(final_model, test_x, test_y, ax=ax)
+run['roc_curve'].upload(fig)
+plt.close(fig)
+
+# Generate and log Precision-Recall curve
+fig, ax = plt.subplots()
+PrecisionRecallDisplay.from_estimator(final_model, test_x, test_y, ax=ax)
+run['precision_recall_curve'].upload(fig)
+plt.close(fig)
+
+run.stop()
 
 # Print the best hyperparameters
 print("Best Hyperparameters:")
@@ -347,6 +393,9 @@ for param, value in best_hyperparams.items():
 print("Classification Report: \n", classification_report(test_y, y_pred)) #print the classification report
 print("Confusion Matrix: \n", confusion_matrix(test_y, y_pred)) #print the confusion matrix
 
+
+"""
+This saves the final model to my folder
 # Define the file path
 file_name = '/Users/eliebibliowicz/Desktop/AiEducation/loanAICA/bestFitModel.pkl'
 
@@ -354,4 +403,145 @@ file_name = '/Users/eliebibliowicz/Desktop/AiEducation/loanAICA/bestFitModel.pkl
 with open(file_name, 'wb') as file:
     pickle.dump(final_model, file)
 
-print(f"Model saved to {file_name}")
+"""
+
+"""
+This logs the model to neptune
+model = neptune.init_model(
+    name="Prediction model",
+    key="MOD", 
+    project="eliebibliowicz/loanAiCA", 
+    api_token="eyJhcGlfYWRkcmVzcyI6Imh0dHBzOi8vYXBwLm5lcHR1bmUuYWkiLCJhcGlfdXJsIjoiaHR0cHM6Ly9hcHAubmVwdHVuZS5haSIsImFwaV9rZXkiOiJlNTAwNmRjMi05NWVmLTQ0NDYtYTliMi1jN2IyM2YzODNmYTcifQ==", # your credentials
+)
+
+file_name = '/Users/eliebibliowicz/Desktop/AiEducation/loanAICA/bestFitModel.pkl'
+model["model/bestFitModel.pkl"].upload(file_name)
+"""
+"""
+used for grid search with random forest classifier
+param_grid = {
+    'n_estimators': [100, 200, 300],
+    'max_depth': [None, 5, 10],
+    'min_samples_split': [2, 5, 10],
+}
+"""
+
+#use grid search to find the best parameters for the random forest classifier (not used in the final model)
+#this is antoher way to find the best parameters, not as efficient as hyperopt with xgboost
+#best_params_forest = random_forest_classifier_grid_search(param_grid, train_x, train_y)
+
+# This function filters the data based on the actual and predicted values.
+# It takes the test features (test_x), test labels (test_y), predicted labels (y_pred),
+# actual value to filter (actual), and predicted value to filter (prediction).
+# It returns the filtered test features (test_x_FN) and filtered test labels (test_y_FN).
+
+def filter_data(test_x, test_y, y_pred, actual=1, prediction=0):
+
+    test_y = test_y.rename('Actual')
+
+    Predictions = pd.Series(y_pred, name='Predictions')
+
+    merged_df = pd.concat([test_y, Predictions], axis=1)
+
+    filtered_df = merged_df[(merged_df['Actual'] == actual) & (merged_df['Predictions'] == prediction)]
+
+    filtered_index = filtered_df.index
+
+    filtered_test_x = test_x.loc[filtered_index]
+
+    concatenated_df = pd.concat([filtered_test_x, filtered_df], axis=1)
+
+    test_x_FN = concatenated_df.drop(['Predictions', 'Actual'], axis=1)
+    test_y_FN = concatenated_df['Actual']
+
+    return test_x_FN, test_y_FN
+
+
+
+# Filter the data to get the false positives
+test_x_FP, test_y_FP = filter_data(test_x, test_y, y_pred, actual=0, prediction=1)
+
+# Create a DeepChecks Dataset object for the false positives
+dataset = Dataset(test_x_FP, test_y_FP)
+
+# Run the WeakSegmentsPerformance check on the false positives
+#this is used to check the performance of the model on the false positives and where it is weak
+#weak_segments_performance = WeakSegmentsPerformance().run(dataset, final_model)
+
+#this part is used to do the same but for false negatives
+#this is for where people got a loan but did not desearve it (defaulted)
+test_x_FN, test_y_FN = filter_data(test_x, test_y, y_pred, actual=1, prediction=0)
+
+dataset = Dataset(test_x_FN, test_y_FN)
+#weak_segments_performance = WeakSegmentsPerformance().run(dataset, final_model)
+
+
+#both weak segments are printed errors because there are 
+#not enough false positives or false negatives to run the check, not really a bad thing
+
+
+"""
+This part is used to explain the model using SHAP values
+SHAP values are used to explain the output of a model, they show the contribution of each feature to the output
+They show how much each feature contributes to the prediction and whether it has a positive or negative impact
+I set dmatrix_test to the test_x_FN to get the shap values for the false negatives
+"""
+
+#Here is the code to plot and show the SHAP charts
+
+#this sets the explainer to the tree explainer and gets the shap values for the test_x_FN
+explainer = shap.TreeExplainer(final_model)
+
+#this creates the dmatrix for the test_x_FN
+dmatrix_test = xgb.DMatrix(test_x, enable_categorical=True)
+
+shapvals = explainer(test_x)
+
+# Save the plots to files
+summary_plot_path = '/Users/eliebibliowicz/Desktop/AiEducation/loanAICA/summary_plot.png'
+beeswarm_plot_path = '/Users/eliebibliowicz/Desktop/AiEducation/loanAICA/beeswarm_plot.png'
+waterfall_plot_path = '/Users/eliebibliowicz/Desktop/AiEducation/loanAICA/waterfall_plot.png'
+
+shap.summary_plot(shapvals, test_x, plot_type='bar')
+plt.savefig(summary_plot_path)
+plt.close()
+
+shap.plots.beeswarm(shapvals)
+plt.savefig(beeswarm_plot_path)
+plt.close()
+
+#this shows the waterfall plot for the first prediction and shows the impact of each feature on the prediction
+
+# Plot the waterfall plot for the selected prediction
+shap.plots.waterfall(shapvals[11], show=False)
+plt.tight_layout()
+plt.savefig(waterfall_plot_path, dpi=300)
+plt.close()
+
+# Open the plots using the default image viewer
+#os.system(f'open {summary_plot_path}')
+#os.system(f'open {beeswarm_plot_path}')
+#os.system(f'open {waterfall_plot_path}')
+
+
+#Using anchor explanations to explain the model
+predict_fn = lambda x: final_model.predict_proba(x)
+explainer = AnchorTabular(predict_fn, feature_names=train_x.columns)
+
+#convert pd to 2d array
+explainer.fit(train_x.values)
+
+idx = 0 #record what to explain
+class_names = ['No Default', 'Default']
+
+print('Prediction: %s' % class_names[explainer.predictor(train_x[idx:idx+1].values)[0]])
+
+explenation = explainer.explain(train_x[idx:idx+1].values[0], threshold=0.95)
+
+print('Anchor: %s' % (' AND '.join(explenation.anchor)))
+print('Precision: %.2f' % explenation.precision)
+print('Coverage: %.2f' % explenation.coverage)
+
+#how to look at specific anchors?
+
+#link to neptune dashboard - https://app.neptune.ai/o/eliebibliowicz/org/loanAiCA/runs/table?viewId=standard-view&detailsTab=metadata&dash=table&type=run&compare=IwJgNAnGAcQ&path=source_code%2Fintegrations%2F&sortBy=%5B%22sys%2Fcreation_time%22%5D&sortFieldType=%5B%22datetime%22%5D&sortFieldAggregationMode=%5B%22auto%22%5D&sortDirection=%5B%22descending%22%5D&suggestionsEnabled=false&lbViewUnpacked=true
